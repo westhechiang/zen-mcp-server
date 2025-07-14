@@ -270,6 +270,7 @@ class OpenAICompatibleProvider(ModelProvider):
         messages: list,
         temperature: float,
         max_output_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
         **kwargs,
     ) -> ModelResponse:
         """Generate content using the /v1/responses endpoint for o3-pro via OpenAI library."""
@@ -308,6 +309,16 @@ class OpenAICompatibleProvider(ModelProvider):
         # Retry logic with progressive delays
         max_retries = 4
         retry_delays = [1, 3, 5, 8]
+        
+        # Set timeout for the API call
+        if timeout is None:
+            from .base import DEFAULT_PROVIDER_TIMEOUT
+            timeout_seconds = DEFAULT_PROVIDER_TIMEOUT
+        else:
+            timeout_seconds = timeout
+            
+        logger.debug(f"Calling {model_name} responses endpoint with timeout of {timeout_seconds} seconds")
+        
         last_exception = None
 
         for attempt in range(max_retries):
@@ -318,8 +329,11 @@ class OpenAICompatibleProvider(ModelProvider):
                     f"o3-pro API request payload: {json.dumps(completion_params, indent=2, ensure_ascii=False)}"
                 )
 
-                # Use OpenAI client's responses endpoint
-                response = self.client.responses.create(**completion_params)
+                # Use OpenAI client's responses endpoint with timeout
+                response = self.client.responses.create(
+                    **completion_params,
+                    timeout=timeout_seconds
+                )
 
                 # Extract content and usage from responses endpoint format
                 # The response format is different for responses endpoint
@@ -391,6 +405,7 @@ class OpenAICompatibleProvider(ModelProvider):
         temperature: float = 0.7,
         max_output_tokens: Optional[int] = None,
         images: Optional[list[str]] = None,
+        timeout: Optional[float] = None,
         **kwargs,
     ) -> ModelResponse:
         """Generate content using the OpenAI-compatible API.
@@ -489,6 +504,7 @@ class OpenAICompatibleProvider(ModelProvider):
                 messages=messages,
                 temperature=temperature,
                 max_output_tokens=max_output_tokens,
+                timeout=timeout,
                 **kwargs,
             )
 
@@ -496,12 +512,24 @@ class OpenAICompatibleProvider(ModelProvider):
         max_retries = 4  # Total of 4 attempts
         retry_delays = [1, 3, 5, 8]  # Progressive delays: 1s, 3s, 5s, 8s
 
+        # Set timeout for the API call
+        if timeout is None:
+            from .base import DEFAULT_PROVIDER_TIMEOUT
+            timeout_seconds = DEFAULT_PROVIDER_TIMEOUT
+        else:
+            timeout_seconds = timeout
+            
+        logger.debug(f"Calling {resolved_model} with timeout of {timeout_seconds} seconds")
+
         last_exception = None
 
         for attempt in range(max_retries):
             try:
-                # Generate completion
-                response = self.client.chat.completions.create(**completion_params)
+                # Generate completion with timeout
+                response = self.client.chat.completions.create(
+                    **completion_params,
+                    timeout=timeout_seconds
+                )
 
                 # Extract content and usage
                 content = response.choices[0].message.content

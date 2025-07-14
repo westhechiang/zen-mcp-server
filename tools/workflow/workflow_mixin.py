@@ -715,7 +715,17 @@ class BaseWorkflowMixin(ABC):
             if continuation_id:
                 self.store_conversation_turn(continuation_id, response_data, request)
 
-            return [TextContent(type="text", text=json.dumps(response_data, indent=2, ensure_ascii=False))]
+            # Format the response as JSON
+            formatted_response = json.dumps(response_data, indent=2, ensure_ascii=False)
+            
+            # Check if response should be streamed due to size
+            if self._should_stream_response(formatted_response):
+                logger.info(f"Large {self.get_name()} workflow response detected ({len(formatted_response):,} chars) - enabling streaming")
+                # Return streaming chunks for large workflow responses
+                return self._create_streaming_response(formatted_response)
+            
+            # Return single response for normal-sized responses
+            return [TextContent(type="text", text=formatted_response)]
 
         except Exception as e:
             logger.error(f"Error in {self.get_name()} work: {e}", exc_info=True)
@@ -1465,6 +1475,9 @@ class BaseWorkflowMixin(ABC):
                 logger.warning(warning)
 
             # Generate AI response - use request parameters if available
+            # Use default timeout from base provider
+            from providers.base import DEFAULT_PROVIDER_TIMEOUT
+            
             model_response = provider.generate_content(
                 prompt=prompt,
                 model_name=model_name,
@@ -1473,6 +1486,7 @@ class BaseWorkflowMixin(ABC):
                 thinking_mode=self.get_request_thinking_mode(request),
                 use_websearch=self.get_request_use_websearch(request),
                 images=list(set(self.consolidated_findings.images)) if self.consolidated_findings.images else None,
+                timeout=DEFAULT_PROVIDER_TIMEOUT,
             )
 
             if model_response.content:

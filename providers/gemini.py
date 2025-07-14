@@ -156,6 +156,7 @@ class GeminiModelProvider(ModelProvider):
         max_output_tokens: Optional[int] = None,
         thinking_mode: str = "medium",
         images: Optional[list[str]] = None,
+        timeout: Optional[float] = None,
         **kwargs,
     ) -> ModelResponse:
         """Generate content using Gemini model."""
@@ -219,11 +220,23 @@ class GeminiModelProvider(ModelProvider):
 
         for attempt in range(max_retries):
             try:
-                # Generate content
+                # Use timeout if provided, otherwise use default
+                if timeout is None:
+                    from .base import DEFAULT_PROVIDER_TIMEOUT
+                    timeout_seconds = DEFAULT_PROVIDER_TIMEOUT
+                else:
+                    timeout_seconds = timeout
+                
+                logger.debug(f"Calling {resolved_name} with timeout of {timeout_seconds} seconds")
+                
+                # Generate content with timeout
+                # The Google genai client supports timeout in the request
                 response = self.client.models.generate_content(
                     model=resolved_name,
                     contents=contents,
                     config=generation_config,
+                    # Set request options with timeout
+                    request_options={"timeout": timeout_seconds},
                 )
 
                 # Extract usage information if available

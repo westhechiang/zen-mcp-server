@@ -1497,3 +1497,29 @@ When recommending searches, be specific about what information you need and why 
         """Parse response - will be inherited for now."""
         # Implementation inherited from current base.py
         raise NotImplementedError("Subclasses must implement _parse_response method")
+
+    def _should_stream_response(self, content: str) -> bool:
+        """
+        Determine if response should be streamed based on size.
+        
+        Args:
+            content: Response content to check
+            
+        Returns:
+            True if content is large enough to benefit from streaming
+        """
+        from utils.streaming import is_large_response
+        return is_large_response(content, threshold=2000)
+    
+    def _create_streaming_response(self, content: str) -> list[TextContent]:
+        """
+        Create a streaming response for large content.
+        
+        Args:
+            content: Large content to stream
+            
+        Returns:
+            List of TextContent chunks for better CLI rendering
+        """
+        from utils.streaming import create_streaming_response
+        return create_streaming_response(content, tool_name=self.name)

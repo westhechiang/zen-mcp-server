@@ -494,6 +494,56 @@ class SimpleTool(BaseTool):
 
         # Format the response using the hook method
         formatted_response = self.format_response(raw_text, request, model_info)
+        
+        # Check if response should be streamed due to size
+        if self._should_stream_response(formatted_response):
+            import logging
+            logger = logging.getLogger(f"tools.{self.get_name()}")
+            logger.info(f"Large {self.get_name()} response detected ({len(formatted_response):,} chars) - enabling streaming")
+            
+            # Return streaming chunks as TextContent list - bypass normal ToolOutput processing
+            streaming_chunks = self._create_streaming_response(formatted_response)
+            
+            # Handle conversation continuation for streaming responses
+            continuation_id = self.get_request_continuation_id(request)
+            if continuation_id:
+                from utils.conversation_memory import add_turn
+                
+                # Extract model metadata for conversation tracking
+                model_provider = None
+                model_name = None
+                model_metadata = None
+                
+                if model_info:
+                    provider = model_info.get("provider")
+                    if provider:
+                        if isinstance(provider, str):
+                            model_provider = provider
+                        else:
+                            try:
+                                model_provider = provider.get_provider_type().value
+                            except AttributeError:
+                                model_provider = str(provider)
+                    model_name = model_info.get("model_name")
+                    model_response = model_info.get("model_response")
+                    if model_response:
+                        model_metadata = {"usage": model_response.usage, "metadata": model_response.metadata}
+                
+                # Add assistant's response to conversation (original raw text, not chunked)
+                add_turn(
+                    continuation_id,
+                    "assistant", 
+                    raw_text,
+                    files=self.get_request_files(request),
+                    images=self.get_request_images(request),
+                    tool_name=self.get_name(),
+                    model_provider=model_provider,
+                    model_name=model_name,
+                    model_metadata=model_metadata,
+                )
+            
+            # Return streaming chunks directly - they're already TextContent objects
+            return streaming_chunks
 
         # Handle conversation continuation like old base.py
         continuation_id = self.get_request_continuation_id(request)

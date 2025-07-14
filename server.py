@@ -168,6 +168,9 @@ logger = logging.getLogger(__name__)
 # This name is used by MCP clients to identify and connect to this specific server
 server: Server = Server("zen-server")
 
+# Tool execution timeout in seconds (configurable via environment variable)
+TOOL_EXECUTION_TIMEOUT = float(os.getenv("ZEN_TOOL_TIMEOUT", "250"))
+
 
 # Constants for tool filtering
 ESSENTIAL_TOOLS = {"version", "listmodels"}
@@ -723,7 +726,7 @@ async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[TextCon
         if "_remaining_tokens" in arguments:
             logger.debug(f"[CONVERSATION_DEBUG] Remaining token budget: {arguments['_remaining_tokens']:,}")
 
-    # Route to AI-powered tools that require Gemini API calls
+    # Route to AI-powered tools that require API calls
     if name in TOOLS:
         logger.info(f"Executing tool '{name}' with {len(arguments)} parameter(s)")
         tool = TOOLS[name]
@@ -804,17 +807,47 @@ async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[TextCon
                 logger.warning(f"File size check failed for {name} with model {model_name}")
                 return [TextContent(type="text", text=ToolOutput(**file_size_check).model_dump_json())]
 
-        # Execute tool with pre-resolved model context
-        result = await tool.execute(arguments)
-        logger.info(f"Tool '{name}' execution completed")
-
-        # Log completion to activity file
+        # Execute tool with pre-resolved model context and timeout
         try:
-            mcp_activity_logger = logging.getLogger("mcp_activity")
-            mcp_activity_logger.info(f"TOOL_COMPLETED: {name}")
-        except Exception:
-            pass
-        return result
+            logger.debug(f"Executing tool '{name}' with {TOOL_EXECUTION_TIMEOUT}s timeout")
+            result = await asyncio.wait_for(
+                tool.execute(arguments),
+                timeout=TOOL_EXECUTION_TIMEOUT
+            )
+            logger.info(f"Tool '{name}' execution completed")
+
+            # Log completion to activity file
+            try:
+                mcp_activity_logger = logging.getLogger("mcp_activity")
+                mcp_activity_logger.info(f"TOOL_COMPLETED: {name}")
+            except Exception:
+                pass
+            return result
+            
+        except asyncio.TimeoutError:
+            logger.error(f"Tool '{name}' execution timed out after {TOOL_EXECUTION_TIMEOUT}s")
+            
+            # Log timeout to activity file
+            try:
+                mcp_activity_logger = logging.getLogger("mcp_activity")
+                mcp_activity_logger.info(f"TOOL_TIMEOUT: {name} after {TOOL_EXECUTION_TIMEOUT}s")
+            except Exception:
+                pass
+                
+            # Return timeout error response
+            timeout_output = ToolOutput(
+                status="error",
+                content=f"Tool execution timed out after {TOOL_EXECUTION_TIMEOUT} seconds. "
+                        f"This may indicate the tool is waiting for a response or processing a very large request. "
+                        f"Consider breaking the task into smaller steps or checking the tool logs for more details.",
+                content_type="text",
+                metadata={
+                    "tool_name": name,
+                    "timeout_seconds": TOOL_EXECUTION_TIMEOUT,
+                    "error_type": "timeout"
+                },
+            )
+            return [TextContent(type="text", text=timeout_output.model_dump_json())]
 
     # Handle unknown tool requests gracefully
     else:
@@ -1305,6 +1338,7 @@ async def main():
     # Log startup message
     logger.info("Zen MCP Server starting up...")
     logger.info(f"Log level: {log_level}")
+    logger.info(f"Tool execution timeout: {TOOL_EXECUTION_TIMEOUT}s")
 
     # Note: MCP client info will be logged during the protocol handshake
     # (when handle_list_tools is called)
@@ -1323,6 +1357,14 @@ async def main():
     logger.info(f"Default thinking mode (ThinkDeep): {DEFAULT_THINKING_MODE_THINKDEEP}")
 
     logger.info(f"Available tools: {list(TOOLS.keys())}")
+    
+    # Log streaming configuration
+    from utils.streaming import STREAMING_ENABLED, STREAMING_CHUNK_SIZE, STREAMING_MAX_CHUNKS, STREAMING_THRESHOLD
+    if STREAMING_ENABLED:
+        logger.info(f"Streaming enabled: {STREAMING_CHUNK_SIZE} chars/chunk, max {STREAMING_MAX_CHUNKS} chunks, threshold {STREAMING_THRESHOLD}")
+    else:
+        logger.info("Streaming disabled")
+    
     logger.info("Server ready - waiting for tool requests...")
 
     # Run the server using stdio transport (standard input/output)

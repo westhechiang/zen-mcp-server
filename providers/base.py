@@ -8,6 +8,9 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
+# Default timeout for AI provider calls (5 minutes for heavy thinking tasks)
+DEFAULT_PROVIDER_TIMEOUT = 300.0  # 5 minutes
+
 
 class ProviderType(Enum):
     """Supported model provider types."""
@@ -214,6 +217,7 @@ class ModelProvider(ABC):
         system_prompt: Optional[str] = None,
         temperature: float = 0.7,
         max_output_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
         **kwargs,
     ) -> ModelResponse:
         """Generate content using the model.
@@ -224,6 +228,7 @@ class ModelProvider(ABC):
             system_prompt: Optional system prompt for model behavior
             temperature: Sampling temperature (0-2)
             max_output_tokens: Maximum tokens to generate
+            timeout: Maximum time in seconds to wait for response (default: provider-specific)
             **kwargs: Provider-specific parameters
 
         Returns:
