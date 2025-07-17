@@ -230,13 +230,12 @@ class GeminiModelProvider(ModelProvider):
                 logger.debug(f"Calling {resolved_name} with timeout of {timeout_seconds} seconds")
                 
                 # Generate content with timeout
-                # The Google genai client supports timeout in the request
+                # Note: Gemini SDK doesn't support timeout parameter directly
+                # The timeout should be handled at the HTTP client level
                 response = self.client.models.generate_content(
                     model=resolved_name,
                     contents=contents,
                     config=generation_config,
-                    # Set request options with timeout
-                    request_options={"timeout": timeout_seconds},
                 )
 
                 # Extract usage information if available
