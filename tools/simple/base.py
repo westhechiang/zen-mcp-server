@@ -429,6 +429,9 @@ class SimpleTool(BaseTool):
             logger.debug(f"Prompt length: {len(prompt)} characters (~{estimated_tokens:,} tokens)")
 
             # Generate content with provider abstraction
+            # Use default timeout from base provider
+            from providers.base import DEFAULT_PROVIDER_TIMEOUT
+            
             model_response = provider.generate_content(
                 prompt=prompt,
                 model_name=self._current_model_name,
@@ -436,6 +439,7 @@ class SimpleTool(BaseTool):
                 temperature=temperature,
                 thinking_mode=thinking_mode if provider.supports_thinking_mode(self._current_model_name) else None,
                 images=images if images else None,
+                timeout=DEFAULT_PROVIDER_TIMEOUT,
             )
 
             logger.info(f"Received response from {provider.get_provider_type().value} API for {self.get_name()}")

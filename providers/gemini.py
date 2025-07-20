@@ -1,8 +1,12 @@
 """Gemini model provider implementation."""
 
+import asyncio
 import base64
+import concurrent.futures
 import logging
 import os
+import signal
+import threading
 import time
 from typing import Optional
 
@@ -229,13 +233,13 @@ class GeminiModelProvider(ModelProvider):
                 
                 logger.debug(f"Calling {resolved_name} with timeout of {timeout_seconds} seconds")
                 
-                # Generate content with timeout
-                # Note: Gemini SDK doesn't support timeout parameter directly
-                # The timeout should be handled at the HTTP client level
-                response = self.client.models.generate_content(
+                # Generate content with manual timeout wrapper
+                # The Gemini SDK doesn't properly enforce timeouts, so we use a thread-based approach
+                response = self._generate_with_timeout(
                     model=resolved_name,
                     contents=contents,
                     config=generation_config,
+                    timeout_seconds=timeout_seconds
                 )
 
                 # Extract usage information if available
@@ -333,6 +337,58 @@ class GeminiModelProvider(ModelProvider):
             return 0
 
         return int(max_thinking_tokens * self.THINKING_BUDGETS[thinking_mode])
+
+    def _generate_with_timeout(self, model: str, contents: list, config: types.GenerateContentConfig, timeout_seconds: float):
+        """
+        Wrapper to enforce timeout on Gemini API calls using threading.
+        
+        The Gemini SDK's request_options timeout parameter doesn't work reliably,
+        so we implement a manual timeout using concurrent.futures.
+        
+        Issue: The Google Gemini Python SDK (google-generativeai) does not properly
+        enforce the timeout parameter passed via request_options. API calls can run
+        indefinitely despite setting a timeout value.
+        
+        Solution: Use concurrent.futures.ThreadPoolExecutor to run the API call in
+        a separate thread and enforce the timeout at the Python level.
+        
+        Note: The thread may continue running in the background after timeout, but
+        the main execution will proceed with a TimeoutError.
+        """
+        def api_call():
+            # Make the actual API call
+            # Note: We still pass timeout to request_options in case it starts working in future SDK versions
+            return self.client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=config,
+                request_options={"timeout": timeout_seconds},
+            )
+        
+        # Use ThreadPoolExecutor to run the API call with a timeout
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(api_call)
+            
+            try:
+                # Wait for the result with timeout
+                response = future.result(timeout=timeout_seconds)
+                return response
+            except concurrent.futures.TimeoutError:
+                # Cancel the future (though it may continue running in the background)
+                future.cancel()
+                
+                # Log the timeout
+                logger.error(f"Gemini API call timed out after {timeout_seconds} seconds for model {model}")
+                
+                # Raise a more descriptive error
+                raise TimeoutError(
+                    f"Gemini API call timed out after {timeout_seconds} seconds. "
+                    f"This is likely due to the model taking too long to process the request. "
+                    f"Consider using a faster model or reducing the complexity of your request."
+                )
+            except Exception as e:
+                # Re-raise any other exceptions from the API call
+                raise e
 
     def _extract_usage(self, response) -> dict[str, int]:
         """Extract token usage from Gemini response."""

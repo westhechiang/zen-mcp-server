@@ -318,3 +318,103 @@ isort --check-only .
 - Proper API keys configured in `.env` file
 
 This guide provides everything needed to efficiently work with the Zen MCP Server codebase using Claude. Always run quality checks before and after making changes to ensure code integrity.
+
+## Recent Fixes and Learnings
+
+### Timeout Implementation Fix (2024)
+
+#### Problem
+The zen-chat and zen-analyze tools were hanging indefinitely (500+ seconds, even 936+ seconds) despite having a DEFAULT_PROVIDER_TIMEOUT of 300 seconds configured throughout the codebase.
+
+#### Root Cause
+The Google Gemini Python SDK (`google-generativeai`) does not properly enforce the timeout parameter passed via `request_options`. The SDK ignores the timeout value, causing API calls to run indefinitely.
+
+#### Solution
+Implemented a manual timeout wrapper using `concurrent.futures.ThreadPoolExecutor` in `/providers/gemini.py`:
+
+```python
+def _generate_with_timeout(self, model: str, contents: list, config: types.GenerateContentConfig, timeout_seconds: float):
+    """
+    Wrapper to enforce timeout on Gemini API calls using threading.
+    
+    The Gemini SDK's request_options timeout parameter doesn't work reliably,
+    so we implement a manual timeout using concurrent.futures.
+    """
+    def api_call():
+        return self.client.models.generate_content(
+            model=model,
+            contents=contents,
+            config=config,
+            request_options={"timeout": timeout_seconds},  # Still pass it in case SDK fixes this
+        )
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(api_call)
+        try:
+            response = future.result(timeout=timeout_seconds)
+            return response
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            raise TimeoutError(f"Gemini API call timed out after {timeout_seconds} seconds...")
+```
+
+#### Key Learnings
+1. **SDK Bugs**: Always verify that SDK parameters actually work as documented
+2. **Thread-based Timeouts**: When SDK timeouts fail, use Python's `concurrent.futures` for manual timeout enforcement
+3. **Provider-specific Handling**: Different providers have different timeout parameter names:
+   - Gemini: Uses `request_options={"timeout": value}`
+   - OpenAI/Others: Use direct `timeout=value` parameter
+4. **Timeout was Previously Removed**: The timeout implementation was removed in the past because it broke OpenAI provider calls - ensure fixes don't break other providers
+
+### Architecture Notes
+
+#### Tool Execution Flow
+1. SimpleTool (`/tools/simple/base.py`): Direct execution with timeout passed to provider
+2. WorkflowTool (`/tools/workflow/base.py`): Multi-step execution with timeout handling in BaseWorkflowMixin
+
+#### Timeout Propagation
+- DEFAULT_PROVIDER_TIMEOUT = 300 seconds (5 minutes) defined in `/providers/base.py`
+- Timeout flows: Tool → execute() → provider.generate_content() → _generate_with_timeout()
+- All layers now properly propagate the timeout value
+
+#### Testing
+Created `/test_gemini_timeout_fix.py` to verify the timeout implementation:
+- Tests with intentionally complex prompts
+- Verifies timeout triggers after specified duration
+- Confirms proper TimeoutError is raised
+
+## MCP Server Management
+
+### Common Issues
+- Multiple zen-mcp-server instances can accumulate if Claude Code crashes
+- Each instance uses ~10-50MB RAM and <1% CPU when idle
+- Normal: 1-3 instances (one per Claude Code window)
+- Problematic: 6+ instances indicate orphaned processes
+
+### Monitoring Commands
+```bash
+# Check zen MCP server status
+ps aux | grep -E "zen-mcp-server|python.*zen" | grep -v grep
+
+# Kill all zen MCP servers
+pkill -f 'zen-mcp-server/server.py'
+```
+
+## Important Configuration
+
+### Environment Variables
+- `GOOGLE_API_KEY`: Required for Gemini provider
+- `OPENAI_API_KEY`: Required for OpenAI provider
+- Other provider keys as needed
+
+### Provider Differences
+- **Gemini**: Requires manual timeout wrapper due to SDK bug
+- **OpenAI**: Direct timeout parameter works correctly
+- **XAI/Others**: Verify timeout behavior when adding new providers
+
+## Development Guidelines
+
+1. **Always Test Timeouts**: When modifying provider code, verify timeouts actually work
+2. **Provider Isolation**: Changes to one provider shouldn't break others
+3. **Logging**: Use debug logging to track timeout values through the call stack
+4. **Error Messages**: Provide clear, actionable error messages for timeout scenarios

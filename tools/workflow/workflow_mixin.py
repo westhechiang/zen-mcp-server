@@ -20,10 +20,12 @@ Features:
 - Comprehensive type annotations for IDE support
 """
 
+import asyncio
 import json
 import logging
 import os
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Any, Optional
 
 from mcp.types import TextContent
@@ -34,6 +36,10 @@ from utils.conversation_memory import add_turn, create_thread
 from ..shared.base_models import ConsolidatedFindings
 
 logger = logging.getLogger(__name__)
+
+# Workflow-level timeout configuration
+DEFAULT_WORKFLOW_TIMEOUT = 600.0  # 10 minutes - allows for multiple provider calls
+MAX_WORKFLOW_TIMEOUT = 1800.0    # 30 minutes - hard limit for complex workflows
 
 
 class BaseWorkflowMixin(ABC):
@@ -595,6 +601,77 @@ class BaseWorkflowMixin(ABC):
     # Main Workflow Orchestration
     # ================================================================================
 
+    def _get_workflow_timeout(self, arguments: dict[str, Any]) -> float:
+        """
+        Get the timeout for this workflow execution.
+        
+        Allows environment variable override for workflow-level timeouts.
+        This is separate from provider timeouts and prevents entire workflows from hanging.
+        """
+        # Check for environment variable override
+        timeout_env = os.getenv("ZEN_WORKFLOW_TIMEOUT")
+        if timeout_env:
+            try:
+                timeout = float(timeout_env)
+                # Cap at maximum allowed timeout
+                return min(timeout, MAX_WORKFLOW_TIMEOUT)
+            except ValueError:
+                logger.warning(f"Invalid ZEN_WORKFLOW_TIMEOUT value: {timeout_env}, using default")
+        
+        # Use default workflow timeout
+        return DEFAULT_WORKFLOW_TIMEOUT
+
+    async def _execute_workflow_with_timeout(self, arguments: dict[str, Any]) -> list[TextContent]:
+        """
+        Execute workflow with timeout enforcement to prevent hanging workflows.
+        
+        This is a wrapper around the actual workflow execution that enforces a 
+        workflow-level timeout in addition to individual provider timeouts.
+        """
+        timeout = self._get_workflow_timeout(arguments)
+        
+        logger.debug(f"Starting workflow execution with {timeout}s timeout")
+        
+        def _execute_sync():
+            # Create new event loop for this thread
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                return loop.run_until_complete(self._execute_workflow_internal(arguments))
+            finally:
+                loop.close()
+        
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_execute_sync)
+            try:
+                result = future.result(timeout=timeout)
+                logger.debug(f"Workflow completed successfully within {timeout}s timeout")
+                return result
+            except FutureTimeoutError:
+                future.cancel()
+                error_msg = (
+                    f"Workflow execution timed out after {timeout}s. This may be due to "
+                    f"large context size or complex analysis. Try reducing context or "
+                    f"breaking down the request into smaller steps."
+                )
+                logger.error(error_msg)
+                
+                # Return a timeout error response
+                from mcp.types import TextContent
+                from tools.models import ToolOutput
+                
+                error_output = ToolOutput(
+                    status="workflow_timeout",
+                    content=error_msg,
+                    content_type="text",
+                    metadata={
+                        "timeout_seconds": timeout,
+                        "workflow_tool": self.get_name(),
+                        "suggestion": "Try reducing context size or breaking down the request"
+                    }
+                )
+                return [TextContent(type="text", text=error_output.model_dump_json())]
+
     async def execute_workflow(self, arguments: dict[str, Any]) -> list[TextContent]:
         """
         Main workflow orchestration following debug tool pattern.
@@ -608,6 +685,16 @@ class BaseWorkflowMixin(ABC):
         6. Generic "certain confidence" handling
         7. Step guidance and required actions
         8. Conversation memory integration
+        
+        This method now includes workflow-level timeout enforcement to prevent hanging.
+        """
+        return await self._execute_workflow_with_timeout(arguments)
+
+    async def _execute_workflow_internal(self, arguments: dict[str, Any]) -> list[TextContent]:
+        """
+        Internal workflow execution method (formerly execute_workflow).
+        
+        This contains the actual workflow logic and is called by the timeout wrapper.
         """
         from mcp.types import TextContent
 

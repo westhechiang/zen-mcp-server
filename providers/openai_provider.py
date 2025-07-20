@@ -1,6 +1,7 @@
 """OpenAI model provider implementation."""
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Optional
 
 from .base import (
@@ -166,12 +167,12 @@ class OpenAIModelProvider(OpenAICompatibleProvider):
         max_output_tokens: Optional[int] = None,
         **kwargs,
     ) -> ModelResponse:
-        """Generate content using OpenAI API with proper model name resolution."""
+        """Generate content using OpenAI API with proper model name resolution and timeout enforcement."""
         # Resolve model alias before making API call
         resolved_model_name = self._resolve_model_name(model_name)
 
-        # Call parent implementation with resolved model name
-        return super().generate_content(
+        # Use manual timeout wrapper for consistent behavior across providers
+        return self._generate_with_timeout(
             prompt=prompt,
             model_name=resolved_model_name,
             system_prompt=system_prompt,
@@ -179,6 +180,56 @@ class OpenAIModelProvider(OpenAICompatibleProvider):
             max_output_tokens=max_output_tokens,
             **kwargs,
         )
+
+    def _generate_with_timeout(
+        self,
+        prompt: str,
+        model_name: str,
+        system_prompt: Optional[str] = None,
+        temperature: float = 0.7,
+        max_output_tokens: Optional[int] = None,
+        **kwargs,
+    ) -> ModelResponse:
+        """Wrap generate_content with manual timeout enforcement.
+        
+        This ensures consistent timeout behavior across all providers.
+        """
+        timeout = kwargs.get('timeout')
+        if timeout is None:
+            from .base import DEFAULT_PROVIDER_TIMEOUT
+            timeout = DEFAULT_PROVIDER_TIMEOUT
+            
+        logger.debug(f"OpenAI: Enforcing {timeout}s timeout for {model_name} using ThreadPoolExecutor")
+        
+        def _generate():
+            # Call parent implementation with resolved model name
+            return super(OpenAIModelProvider, self).generate_content(
+                prompt=prompt,
+                model_name=model_name,
+                system_prompt=system_prompt,
+                temperature=temperature,
+                max_output_tokens=max_output_tokens,
+                **kwargs,
+            )
+        
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_generate)
+            try:
+                result = future.result(timeout=timeout)
+                return result
+            except FutureTimeoutError:
+                # Cancel the future
+                future.cancel()
+                error_msg = (
+                    f"OpenAI API call timed out after {timeout}s for model {model_name}. "
+                    f"This is a manual timeout enforcement to ensure consistent behavior."
+                )
+                logger.error(error_msg)
+                raise TimeoutError(error_msg)
+            except Exception as e:
+                # Re-raise any other exceptions
+                logger.error(f"OpenAI API error for {model_name}: {str(e)}")
+                raise
 
     def supports_thinking_mode(self, model_name: str) -> bool:
         """Check if the model supports extended thinking mode."""
